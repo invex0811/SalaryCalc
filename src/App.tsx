@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   UploadCloud, 
   Trash2, 
-  Plus, 
   RefreshCw, 
   DollarSign, 
   Calendar, 
@@ -21,34 +20,12 @@ interface TeamMember {
   id: string;
   name: string;
   companyName: string;
+  sourceFileName: string;
   salaryType: 'paystub' | 'remainder' | 'fixed';
   fixedAmount?: number;
-  splitRatio: number;
 }
 
-const DEFAULT_MEMBERS: TeamMember[] = [
-  {
-    id: '1',
-    name: 'Игорь Кєся',
-    companyName: 'КЄСЯ ІГОР МИКОЛАЙОВИЧ',
-    salaryType: 'paystub',
-    splitRatio: 0.5,
-  },
-  {
-    id: '2',
-    name: 'Эдуард Качалов',
-    companyName: 'КАЧАЛОВ ЕДУАРД МАКСИМОВИЧ',
-    salaryType: 'paystub',
-    splitRatio: 0.5,
-  },
-  {
-    id: '3',
-    name: 'Руслан',
-    companyName: '',
-    salaryType: 'remainder',
-    splitRatio: 1.0,
-  }
-];
+const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export default function App() {
   // --- States ---
@@ -69,7 +46,7 @@ export default function App() {
   const [deductEcb, setDeductEcb] = useState<boolean>(false);
   
   const [payStubs, setPayStubs] = useState<PayStubData[]>([]);
-  const [teamMembers, setTeamMembers] = useState<TeamMember[]>(DEFAULT_MEMBERS);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [showConfig, setShowConfig] = useState<boolean>(false);
   
@@ -106,9 +83,9 @@ export default function App() {
       } else {
         throw new Error('Курс USD на указанную дату отсутствует в API НБУ');
       }
-    } catch (error: any) {
+    } catch (error: unknown) {
       console.error('NBU API Fetch Error:', error);
-      setNbuStatus({ success: false, message: `Не удалось загрузить курс: ${error.message || error}` });
+      setNbuStatus({ success: false, message: `Не удалось загрузить курс: ${getErrorMessage(error)}` });
     } finally {
       setIsNbuLoading(false);
     }
@@ -116,6 +93,7 @@ export default function App() {
 
   // Fetch rate on date change
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchExchangeRate(date);
   }, [date]);
 
@@ -126,15 +104,15 @@ export default function App() {
     
     for (let i = 0; i < files.length; i++) {
       const file = files[i];
-      if (!file.name.endsWith('.xlsx')) {
-        errors.push(`Файл ${file.name} не является Excel-файлом (.xlsx)`);
+      if (!/\.xlsx?$/i.test(file.name)) {
+        errors.push(`Файл ${file.name} не является Excel-файлом (.xls или .xlsx)`);
         continue;
       }
       try {
         const stubData = await parsePayStubExcel(file);
         newStubs.push(stubData);
-      } catch (err: any) {
-        errors.push(`Ошибка в файле ${file.name}: ${err.message || err}`);
+      } catch (error: unknown) {
+        errors.push(`Ошибка в файле ${file.name}: ${getErrorMessage(error)}`);
       }
     }
 
@@ -143,35 +121,29 @@ export default function App() {
     }
 
     if (newStubs.length > 0) {
-      setPayStubs((prev) => {
-        // Убираем дубликаты по имени компании / сотрудника
-        const filtered = prev.filter(
-          (old) => !newStubs.some((n) => n.companyName.toUpperCase() === old.companyName.toUpperCase())
-        );
-        const updated = [...filtered, ...newStubs];
-        
-        // Автоматически добавляем участников из новых файлов, если их имени нет в списке
-        setTeamMembers((prevMembers) => {
-          const membersCopy = [...prevMembers];
-          newStubs.forEach((stub) => {
-            const exists = membersCopy.some(
-              (m) => m.companyName.toUpperCase() === stub.companyName.toUpperCase()
-            );
-            if (!exists) {
-              membersCopy.push({
-                id: String(Date.now() + Math.random()),
-                name: stub.agentName,
-                companyName: stub.companyName,
-                salaryType: 'paystub',
-                splitRatio: 0.5,
-              });
-            }
-          });
-          return membersCopy;
-        });
+      // Повторная загрузка файла заменяет его предыдущую версию.
+      const filtered = payStubs.filter(
+        (old) => !newStubs.some((stub) => stub.fileName.toUpperCase() === old.fileName.toUpperCase())
+      );
+      const updated = [...filtered, ...newStubs];
 
-        return updated;
-      });
+      setPayStubs(updated);
+
+      // Один загруженный файл всегда соответствует одному участнику.
+      setTeamMembers((prevMembers) => updated.map((stub) => {
+        const existing = prevMembers.find(
+          (member) => member.sourceFileName.toUpperCase() === stub.fileName.toUpperCase()
+        );
+
+        return {
+          id: existing?.id ?? `paystub:${stub.fileName.toLowerCase()}`,
+          name: stub.agentName,
+          companyName: stub.companyName,
+          sourceFileName: stub.fileName,
+          salaryType: existing?.salaryType ?? 'paystub',
+          fixedAmount: existing?.fixedAmount,
+        };
+      }));
     }
   };
 
@@ -199,32 +171,23 @@ export default function App() {
   };
 
   const removePayStub = (index: number) => {
-    setPayStubs((prev) => prev.filter((_, i) => i !== index));
+    const fileName = payStubs[index]?.fileName;
+    if (!fileName) return;
+
+    setPayStubs((prev) => prev.filter((stub) => stub.fileName !== fileName));
+    setTeamMembers((prev) => prev.filter((member) => member.sourceFileName !== fileName));
   };
 
   // --- Member CRUD Handlers ---
-  const addMember = () => {
-    setTeamMembers((prev) => [
-      ...prev,
-      {
-        id: String(Date.now()),
-        name: 'Новый сотрудник',
-        companyName: '',
-        salaryType: 'paystub',
-        splitRatio: 0.5,
-      }
-    ]);
-  };
-
   const updateMember = (id: string, fields: Partial<TeamMember>) => {
     setTeamMembers((prev) => prev.map((m) => (m.id === id ? { ...m, ...fields } : m)));
   };
 
-  const deleteMember = (id: string) => {
-    setTeamMembers((prev) => prev.filter((m) => m.id !== id));
-  };
-
   // --- Salary Calculations ---
+  const memberCount = teamMembers.length;
+  const dynamicSplitRatio = memberCount > 0 ? 1 / memberCount : 0;
+  const ecbPerMember = memberCount > 0 ? ecbAmount / memberCount : 0;
+
   // Pass 1: Get Gross Salaries for non-remainder members
   const memberIntermediateCalculations = teamMembers.map((member) => {
     let payStubRemaining = 0;
@@ -232,12 +195,10 @@ export default function App() {
     let matchedStubFile = '';
 
     if (member.salaryType === 'paystub') {
-      const matchedStub = payStubs.find(
-        (stub) => stub.companyName.trim().toUpperCase() === member.companyName.trim().toUpperCase()
-      );
+      const matchedStub = payStubs.find((stub) => stub.fileName === member.sourceFileName);
       if (matchedStub) {
         payStubRemaining = matchedStub.remainingPay;
-        grossUSD = payStubRemaining * member.splitRatio;
+        grossUSD = payStubRemaining * dynamicSplitRatio;
         matchedStubFile = matchedStub.fileName;
       }
     } else if (member.salaryType === 'fixed') {
@@ -246,6 +207,7 @@ export default function App() {
 
     return {
       ...member,
+      splitRatio: dynamicSplitRatio,
       payStubRemaining,
       grossUSD,
       matchedStubFile
@@ -267,7 +229,7 @@ export default function App() {
     const tax1 = grossUSD * 0.01;
     const netUSD = grossUSD - (tax5 + tax1);
     const netUAH = netUSD * exchangeRate;
-    const ecbUAH = deductEcb ? (ecbAmount / teamMembers.length) : 0;
+    const ecbUAH = deductEcb ? ecbPerMember : 0;
     const toCardUAH = netUAH - ecbUAH;
 
     return {
@@ -441,7 +403,7 @@ export default function App() {
                 </label>
                 {deductEcb && (
                   <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem', paddingLeft: '0.25rem' }}>
-                    Будет вычтено по <b>{formatCurrency(ecbAmount / teamMembers.length, true)} грн.</b> на человека ({teamMembers.length} уч.)
+                    Будет вычтено по <b>{formatCurrency(ecbPerMember, true)} грн.</b> на человека ({memberCount} уч.)
                   </p>
                 )}
               </div>
@@ -471,7 +433,7 @@ export default function App() {
                 ref={fileInputRef}
                 onChange={handleFileChange}
                 multiple
-                accept=".xlsx"
+                accept=".xls,.xlsx"
                 style={{ display: 'none' }}
               />
               <div className="dropzone-icon">
@@ -479,7 +441,7 @@ export default function App() {
               </div>
               <div>
                 <p style={{ fontWeight: 600, fontSize: '0.95rem', marginBottom: '0.25rem' }}>
-                  Перетащите сюда файлы PayStub (.xlsx) или нажмите для выбора
+                  Перетащите сюда файлы PayStub (.xls, .xlsx) или нажмите для выбора
                 </p>
                 <p style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
                   Имя берется из ячейки COMPANY NAME, сумма из REMAINING PAY
@@ -519,14 +481,11 @@ export default function App() {
           {/* Team configuration panel (toggled by settings button) */}
           {showConfig && (
             <div className="glass-card animate-fade-in" style={{ borderColor: 'rgba(0, 229, 255, 0.25)' }}>
-              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '1.5rem' }}>
                 <h2 style={{ fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <Users size={20} style={{ color: 'var(--secondary)' }} />
                   Управление Участниками Расчета
                 </h2>
-                <button onClick={addMember} className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}>
-                  <Plus size={14} /> Добавить
-                </button>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -535,7 +494,7 @@ export default function App() {
                     key={member.id} 
                     style={{ 
                       display: 'grid', 
-                      gridTemplateColumns: '1fr 1fr 1fr auto', 
+                      gridTemplateColumns: '1fr 1fr 1fr',
                       gap: '1rem', 
                       alignItems: 'end',
                       background: 'rgba(255, 255, 255, 0.02)',
@@ -559,7 +518,7 @@ export default function App() {
                       <label className="input-label" style={{ fontSize: '0.75rem' }}>Тип расчета</label>
                       <select 
                         value={member.salaryType} 
-                        onChange={(e) => updateMember(member.id, { salaryType: e.target.value as any })}
+                        onChange={(e) => updateMember(member.id, { salaryType: e.target.value as TeamMember['salaryType'] })}
                         className="input-control"
                         style={{ padding: '0.5rem 0.75rem', fontSize: '0.9rem', background: '#0b0c16' }}
                       >
@@ -588,8 +547,8 @@ export default function App() {
                           <input 
                             type="number" 
                             step="0.05"
-                            value={member.splitRatio} 
-                            onChange={(e) => updateMember(member.id, { splitRatio: parseFloat(e.target.value) || 0 })}
+                            value={dynamicSplitRatio}
+                            readOnly
                             className="input-control"
                             style={{ padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
                           />
@@ -617,14 +576,6 @@ export default function App() {
                       </div>
                     )}
 
-                    <button 
-                      onClick={() => deleteMember(member.id)}
-                      className="btn btn-danger"
-                      style={{ padding: '0.5rem', borderRadius: '8px' }}
-                      title="Удалить сотрудника"
-                    >
-                      <Trash2 size={16} />
-                    </button>
                   </div>
                 ))}
               </div>
@@ -761,10 +712,11 @@ export default function App() {
               <HelpCircle size={16} style={{ color: 'var(--text-muted)', flexShrink: 0, marginTop: '2px' }} />
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
                 <b>Формулы расчета:</b><br />
-                • Грязная зп (Gross) для файлов = <code>REMAINING PAY * Доля (обычно 0.5)</code>.<br />
+                • Доля рассчитывается автоматически: <code>1 / количество участников ({memberCount}) = {formatCurrency(dynamicSplitRatio)}</code>.<br />
+                • Грязная зп (Gross) для файлов = <code>REMAINING PAY * динамическая доля</code>.<br />
                 • Налог = <code>Gross * 5%</code>. Военный сбор = <code>Gross * 1%</code>.<br />
                 • Чистыми (USD) = <code>Gross - Налоги (6%)</code>. Чистыми (грн) = <code>Чистыми (USD) * Курс НБУ ({exchangeRate})</code>.<br />
-                • При включенном ЕСВ вычитается ровно <code>{formatCurrency(ecbAmount, true)} ₴ / {teamMembers.length} чел. = {formatCurrency(ecbAmount / teamMembers.length, true)} ₴</code> из выплаты каждого участника.
+                • При включенном ЕСВ вычитается ровно <code>{formatCurrency(ecbAmount, true)} ₴ / {memberCount} чел. = {formatCurrency(ecbPerMember, true)} ₴</code> из выплаты каждого участника.
               </div>
             </div>
           </div>
