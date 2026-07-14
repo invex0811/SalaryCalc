@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import { 
   UploadCloud, 
   Trash2, 
+  Plus,
   RefreshCw, 
   DollarSign, 
   Calendar, 
@@ -20,7 +21,7 @@ interface TeamMember {
   id: string;
   name: string;
   companyName: string;
-  sourceFileName: string;
+  sourceFileName?: string;
   salaryType: 'paystub' | 'remainder' | 'fixed';
   fixedAmount?: number;
 }
@@ -130,20 +131,25 @@ export default function App() {
       setPayStubs(updated);
 
       // Один загруженный файл всегда соответствует одному участнику.
-      setTeamMembers((prevMembers) => updated.map((stub) => {
-        const existing = prevMembers.find(
-          (member) => member.sourceFileName.toUpperCase() === stub.fileName.toUpperCase()
-        );
+      setTeamMembers((prevMembers) => {
+        const manualMembers = prevMembers.filter((member) => !member.sourceFileName);
+        const fileMembers = updated.map((stub) => {
+          const existing = prevMembers.find(
+            (member) => member.sourceFileName?.toUpperCase() === stub.fileName.toUpperCase()
+          );
 
-        return {
-          id: existing?.id ?? `paystub:${stub.fileName.toLowerCase()}`,
-          name: stub.agentName,
-          companyName: stub.companyName,
-          sourceFileName: stub.fileName,
-          salaryType: existing?.salaryType ?? 'paystub',
-          fixedAmount: existing?.fixedAmount,
-        };
-      }));
+          return {
+            id: existing?.id ?? `paystub:${stub.fileName.toLowerCase()}`,
+            name: stub.agentName,
+            companyName: stub.companyName,
+            sourceFileName: stub.fileName,
+            salaryType: existing?.salaryType ?? 'paystub',
+            fixedAmount: existing?.fixedAmount,
+          } satisfies TeamMember;
+        });
+
+        return [...fileMembers, ...manualMembers];
+      });
     }
   };
 
@@ -179,13 +185,32 @@ export default function App() {
   };
 
   // --- Member CRUD Handlers ---
+  const addMember = () => {
+    setTeamMembers((prev) => [
+      ...prev,
+      {
+        id: `manual:${Date.now()}`,
+        name: 'Новый сотрудник',
+        companyName: '',
+        salaryType: 'remainder',
+      },
+    ]);
+  };
+
   const updateMember = (id: string, fields: Partial<TeamMember>) => {
     setTeamMembers((prev) => prev.map((m) => (m.id === id ? { ...m, ...fields } : m)));
   };
 
+  const deleteMember = (id: string) => {
+    setTeamMembers((prev) => prev.filter((member) => member.id !== id));
+  };
+
   // --- Salary Calculations ---
   const memberCount = teamMembers.length;
-  const dynamicSplitRatio = memberCount > 0 ? 1 / memberCount : 0;
+  const payStubMemberCount = teamMembers.filter(
+    (member) => member.salaryType === 'paystub' && member.sourceFileName
+  ).length;
+  const payStubSplitRatio = payStubMemberCount > 0 ? 1 / payStubMemberCount : 0;
   const ecbPerMember = memberCount > 0 ? ecbAmount / memberCount : 0;
 
   // Pass 1: Get Gross Salaries for non-remainder members
@@ -198,7 +223,7 @@ export default function App() {
       const matchedStub = payStubs.find((stub) => stub.fileName === member.sourceFileName);
       if (matchedStub) {
         payStubRemaining = matchedStub.remainingPay;
-        grossUSD = payStubRemaining * dynamicSplitRatio;
+        grossUSD = payStubRemaining * payStubSplitRatio;
         matchedStubFile = matchedStub.fileName;
       }
     } else if (member.salaryType === 'fixed') {
@@ -207,7 +232,7 @@ export default function App() {
 
     return {
       ...member,
-      splitRatio: dynamicSplitRatio,
+      splitRatio: member.salaryType === 'paystub' ? payStubSplitRatio : 0,
       payStubRemaining,
       grossUSD,
       matchedStubFile
@@ -481,11 +506,14 @@ export default function App() {
           {/* Team configuration panel (toggled by settings button) */}
           {showConfig && (
             <div className="glass-card animate-fade-in" style={{ borderColor: 'rgba(0, 229, 255, 0.25)' }}>
-              <div style={{ display: 'flex', alignItems: 'center', marginBottom: '1.5rem' }}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem', gap: '1rem' }}>
                 <h2 style={{ fontSize: '1.2rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
                   <Users size={20} style={{ color: 'var(--secondary)' }} />
                   Управление Участниками Расчета
                 </h2>
+                <button onClick={addMember} className="btn btn-secondary" style={{ padding: '0.4rem 0.8rem', fontSize: '0.85rem' }}>
+                  <Plus size={14} /> Добавить без файла
+                </button>
               </div>
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
@@ -494,7 +522,7 @@ export default function App() {
                     key={member.id} 
                     style={{ 
                       display: 'grid', 
-                      gridTemplateColumns: '1fr 1fr 1fr',
+                      gridTemplateColumns: '1fr 1fr 1fr auto',
                       gap: '1rem', 
                       alignItems: 'end',
                       background: 'rgba(255, 255, 255, 0.02)',
@@ -522,7 +550,7 @@ export default function App() {
                         className="input-control"
                         style={{ padding: '0.5rem 0.75rem', fontSize: '0.9rem', background: '#0b0c16' }}
                       >
-                        <option value="paystub">По файлу Paystub</option>
+                        {member.sourceFileName && <option value="paystub">По файлу Paystub</option>}
                         <option value="remainder">Остаток от контракта</option>
                         <option value="fixed">Фиксированная (USD)</option>
                       </select>
@@ -547,7 +575,7 @@ export default function App() {
                           <input 
                             type="number" 
                             step="0.05"
-                            value={dynamicSplitRatio}
+                            value={payStubSplitRatio}
                             readOnly
                             className="input-control"
                             style={{ padding: '0.5rem 0.75rem', fontSize: '0.9rem' }}
@@ -572,8 +600,19 @@ export default function App() {
 
                     {member.salaryType === 'remainder' && (
                       <div style={{ padding: '0.5rem 0', fontSize: '0.85rem', color: 'var(--text-muted)', fontStyle: 'italic' }}>
-                        Получит остаток от суммы контракта
+                        Получит остаток ${formatCurrency(remainderPool)} / {remainderCount} = ${formatCurrency(remainderGrossPerMember)}
                       </div>
+                    )}
+
+                    {!member.sourceFileName && (
+                      <button
+                        onClick={() => deleteMember(member.id)}
+                        className="btn btn-danger"
+                        style={{ padding: '0.5rem', borderRadius: '8px' }}
+                        title="Удалить сотрудника"
+                      >
+                        <Trash2 size={16} />
+                      </button>
                     )}
 
                   </div>
@@ -712,8 +751,9 @@ export default function App() {
               <HelpCircle size={16} style={{ color: 'var(--text-muted)', flexShrink: 0, marginTop: '2px' }} />
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
                 <b>Формулы расчета:</b><br />
-                • Доля рассчитывается автоматически: <code>1 / количество участников ({memberCount}) = {formatCurrency(dynamicSplitRatio)}</code>.<br />
-                • Грязная зп (Gross) для файлов = <code>REMAINING PAY * динамическая доля</code>.<br />
+                • Доля PayStub рассчитывается автоматически: <code>1 / количество активных PayStub ({payStubMemberCount}) = {formatCurrency(payStubSplitRatio)}</code>.<br />
+                • Грязная зп (Gross) для файлов = <code>REMAINING PAY * доля PayStub</code>.<br />
+                • Участники без файла делят остаток: <code>(Общая сумма - зарплаты по файлам и фиксированные выплаты) / количество участников без файла</code>.<br />
                 • Налог = <code>Gross * 5%</code>. Военный сбор = <code>Gross * 1%</code>.<br />
                 • Чистыми (USD) = <code>Gross - Налоги (6%)</code>. Чистыми (грн) = <code>Чистыми (USD) * Курс НБУ ({exchangeRate})</code>.<br />
                 • При включенном ЕСВ вычитается ровно <code>{formatCurrency(ecbAmount, true)} ₴ / {memberCount} чел. = {formatCurrency(ecbPerMember, true)} ₴</code> из выплаты каждого участника.
