@@ -16,15 +16,7 @@ import {
   Settings
 } from 'lucide-react';
 import { parsePayStubExcel, type PayStubData } from './utils/excelParser';
-
-interface TeamMember {
-  id: string;
-  name: string;
-  companyName: string;
-  sourceFileName?: string;
-  salaryType: 'paystub' | 'remainder' | 'fixed';
-  fixedAmount?: number;
-}
+import { calculateSalaries, type TeamMember } from './salaryCalculations';
 
 const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -206,67 +198,22 @@ export default function App() {
   };
 
   // --- Salary Calculations ---
-  const memberCount = teamMembers.length;
-  const payStubMemberCount = teamMembers.filter(
-    (member) => member.salaryType === 'paystub' && member.sourceFileName
-  ).length;
-  const payStubSplitRatio = payStubMemberCount > 0 ? 1 / payStubMemberCount : 0;
-  const ecbPerMember = memberCount > 0 ? ecbAmount / memberCount : 0;
-
-  // Pass 1: Get Gross Salaries for non-remainder members
-  const memberIntermediateCalculations = teamMembers.map((member) => {
-    let payStubRemaining = 0;
-    let grossUSD = 0;
-    let matchedStubFile = '';
-
-    if (member.salaryType === 'paystub') {
-      const matchedStub = payStubs.find((stub) => stub.fileName === member.sourceFileName);
-      if (matchedStub) {
-        payStubRemaining = matchedStub.remainingPay;
-        grossUSD = payStubRemaining * payStubSplitRatio;
-        matchedStubFile = matchedStub.fileName;
-      }
-    } else if (member.salaryType === 'fixed') {
-      grossUSD = member.fixedAmount || 0;
-    }
-
-    return {
-      ...member,
-      splitRatio: member.salaryType === 'paystub' ? payStubSplitRatio : 0,
-      payStubRemaining,
-      grossUSD,
-      matchedStubFile
-    };
-  });
-
-  const sumNonRemainderGross = memberIntermediateCalculations
-    .filter((m) => m.salaryType !== 'remainder')
-    .reduce((sum, m) => sum + m.grossUSD, 0);
-
-  const remainderPool = Math.max(0, totalContractAmount - sumNonRemainderGross);
-  const remainderCount = teamMembers.filter((m) => m.salaryType === 'remainder').length;
-  const remainderGrossPerMember = remainderCount > 0 ? remainderPool / remainderCount : 0;
-
-  // Pass 2: Final Calculation for all members
-  const calculatedMembers = memberIntermediateCalculations.map((m) => {
-    const grossUSD = m.salaryType === 'remainder' ? remainderGrossPerMember : m.grossUSD;
-    const tax5 = grossUSD * 0.05;
-    const tax1 = grossUSD * 0.01;
-    const netUSD = grossUSD - (tax5 + tax1);
-    const netUAH = netUSD * exchangeRate;
-    const ecbUAH = deductEcb ? ecbPerMember : 0;
-    const toCardUAH = netUAH - ecbUAH;
-
-    return {
-      ...m,
-      grossUSD,
-      tax5,
-      tax1,
-      netUSD,
-      netUAH,
-      ecbUAH,
-      toCardUAH
-    };
+  const {
+    memberCount,
+    splitParticipantCount,
+    payStubSplitRatio,
+    ecbPerMember,
+    remainderPool,
+    remainderCount,
+    remainderGrossPerMember,
+    calculatedMembers,
+  } = calculateSalaries({
+    teamMembers,
+    payStubs,
+    totalContractAmount,
+    exchangeRate,
+    ecbAmount,
+    deductEcb,
   });
 
   // Column Totals
@@ -751,7 +698,7 @@ export default function App() {
               <HelpCircle size={16} style={{ color: 'var(--text-muted)', flexShrink: 0, marginTop: '2px' }} />
               <div style={{ fontSize: '0.8rem', color: 'var(--text-secondary)', lineHeight: '1.4' }}>
                 <b>Формулы расчета:</b><br />
-                • Доля PayStub рассчитывается автоматически: <code>1 / количество активных PayStub ({payStubMemberCount}) = {formatCurrency(payStubSplitRatio)}</code>.<br />
+                • Доля PayStub рассчитывается автоматически: <code>1 / количество участников без фиксированной зарплаты ({splitParticipantCount}) = {formatCurrency(payStubSplitRatio)}</code>.<br />
                 • Грязная зп (Gross) для файлов = <code>REMAINING PAY * доля PayStub</code>.<br />
                 • Участники без файла делят остаток: <code>(Общая сумма - зарплаты по файлам и фиксированные выплаты) / количество участников без файла</code>.<br />
                 • Налог = <code>Gross * 5%</code>. Военный сбор = <code>Gross * 1%</code>.<br />
