@@ -73,6 +73,7 @@ body {
 /* Global Container */
 .container {
   width: 100%;
+  min-width: 0;
   max-width: 1300px;
   margin: 0 auto;
   padding: 2.5rem 1.5rem;
@@ -366,12 +367,58 @@ tr:hover td {
 /* Responsive grid layouts */
 .dashboard-grid {
   display: grid;
-  grid-template-columns: 1fr;
+  grid-template-columns: minmax(0, 1fr);
   gap: 2rem;
+}
+/* Без min-width: 0 широкая таблица распирает колонку и страница уезжает вправо */
+.dashboard-grid > * {
+  min-width: 0;
 }
 @media (min-width: 1024px) {
   .dashboard-grid {
-    grid-template-columns: 320px 1fr;
+    grid-template-columns: 320px minmax(0, 1fr);
+  }
+}
+code {
+  overflow-wrap: anywhere;
+}
+
+.tax-total {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+  margin-top: 1.5rem;
+  padding: 1rem 1.25rem;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 0, 127, 0.25);
+  background: rgba(255, 0, 127, 0.05);
+}
+
+.member-row {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 1rem;
+  align-items: end;
+  background: rgba(255, 255, 255, 0.02);
+  padding: 1rem;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+@media (max-width: 640px) {
+  .container {
+    padding: 1.5rem 1rem;
+  }
+  .glass-card {
+    padding: 1.25rem;
+  }
+  h1 {
+    font-size: 1.6rem;
+  }
+  th, td {
+    padding: 0.75rem 0.85rem;
   }
 }
 
@@ -393,4 +440,130 @@ tr:hover td {
 }
 @keyframes spin {
   to { transform: rotate(360deg); }
+}
+
+/* --- Учёт и остатки --- */
+.ledger {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 1.5rem;
+}
+.ledger-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 1rem;
+}
+.ledger-status {
+  display: flex;
+  align-items: center;
+  gap: 0.4rem;
+  font-size: 0.85rem;
+  margin-top: 0.35rem;
+}
+.ledger-title {
+  font-size: 1.1rem;
+  margin-bottom: 1rem;
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+}
+.ledger-form {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(170px, 1fr));
+  gap: 1rem;
+}
+.balance-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 1.5rem;
+}
+.balance-card {
+  padding: 1.5rem;
+}
+.balance-name {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.balance-amount {
+  font-size: 2rem;
+  font-weight: 700;
+  margin-top: 0.5rem;
+  font-variant-numeric: tabular-nums;
+}
+.balance-sub {
+  font-size: 0.85rem;
+  color: var(--text-muted);
+}
+.balance-rows {
+  margin-top: 1rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  font-size: 0.85rem;
+}
+.balance-rows div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.balance-rows span {
+  color: var(--text-secondary);
+}
+
+/* --- Вкладки --- */
+.tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 2rem;
+  border-bottom: 1px solid var(--border);
+  overflow-x: auto;
+}
+.tab {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  padding: 0.75rem 1.25rem;
+  background: none;
+  border: none;
+  border-bottom: 2px solid transparent;
+  margin-bottom: -1px;
+  color: var(--text-secondary);
+  font: inherit;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: var(--transition-smooth);
+}
+.tab:hover {
+  color: var(--text-primary);
+}
+.tab.active {
+  color: var(--text-primary);
+  border-bottom-color: var(--secondary);
+}
+.tab-badge {
+  font-size: 0.75rem;
+  padding: 0.1rem 0.5rem;
+  border-radius: 999px;
+  background: rgba(0, 230, 118, 0.12);
+  color: var(--success);
+  font-variant-numeric: tabular-nums;
+}
+.link-button {
+  background: none;
+  border: none;
+  padding: 0;
+  margin-left: 0.5rem;
+  color: var(--secondary);
+  font: inherit;
+  cursor: pointer;
+  text-decoration: underline;
 }

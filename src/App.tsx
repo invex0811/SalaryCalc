@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { 
   UploadCloud, 
   Trash2, 
@@ -13,10 +13,74 @@ import {
   HelpCircle,
   TrendingUp,
   CreditCard,
-  Settings
+  Settings,
+  Save,
+  Wallet
 } from 'lucide-react';
 import { parsePayStubExcel, type PayStubData } from './utils/excelParser';
 import { calculateSalaries, type TeamMember } from './salaryCalculations';
+import { buildAccruals, computeBalances, defaultPeriodForDate, formatPeriod, nextPartForPeriod } from './ledger.ts';
+import { fetchNbuRate } from './nbu.ts';
+import { useLedger } from './useLedger.ts';
+import Ledger from './Ledger.tsx';
+
+const MEMBERS_KEY = 'salarycalc:manual-members';
+const PERMANENT_MEMBER_ID = 'manual:ruslan';
+
+const permanentMember = (): TeamMember => ({
+  id: PERMANENT_MEMBER_ID,
+  name: 'Руслан',
+  companyName: '',
+  salaryType: 'remainder',
+});
+
+/** Участники без файла сохраняются в браузере; Руслан присутствует всегда. */
+const loadManualMembers = (): TeamMember[] => {
+  let saved: TeamMember[] = [];
+  try {
+    const raw: unknown = JSON.parse(localStorage.getItem(MEMBERS_KEY) ?? '[]');
+    if (Array.isArray(raw)) {
+      saved = raw
+        .filter((m): m is TeamMember => !!m && typeof m.id === 'string' && typeof m.name === 'string')
+        .map((m) => ({
+          id: m.id,
+          name: m.name,
+          companyName: '',
+          salaryType: m.salaryType === 'fixed' ? 'fixed' : 'remainder',
+          fixedAmount: typeof m.fixedAmount === 'number' ? m.fixedAmount : undefined,
+        }));
+    }
+  } catch {
+    // повреждённые данные — начинаем с участника по умолчанию
+  }
+  return saved.some((m) => m.id === PERMANENT_MEMBER_ID) ? saved : [permanentMember(), ...saved];
+};
+
+const PARAMS_KEY = 'salarycalc:params';
+
+interface SavedParams {
+  totalContractAmount: number;
+  ecbAmount: number;
+  deductEcb: boolean;
+  deductTaxes: boolean;
+}
+
+/** Последние введённые параметры расчёта — чтобы не вводить их заново. */
+const loadParams = (): SavedParams => {
+  const defaults: SavedParams = { totalContractAmount: 1124.5, ecbAmount: 1903, deductEcb: false, deductTaxes: true };
+  try {
+    const raw = JSON.parse(localStorage.getItem(PARAMS_KEY) ?? 'null') as Partial<SavedParams> | null;
+    if (!raw || typeof raw !== 'object') return defaults;
+    return {
+      totalContractAmount: Number.isFinite(raw.totalContractAmount) ? Number(raw.totalContractAmount) : defaults.totalContractAmount,
+      ecbAmount: Number.isFinite(raw.ecbAmount) ? Number(raw.ecbAmount) : defaults.ecbAmount,
+      deductEcb: typeof raw.deductEcb === 'boolean' ? raw.deductEcb : defaults.deductEcb,
+      deductTaxes: typeof raw.deductTaxes === 'boolean' ? raw.deductTaxes : defaults.deductTaxes,
+    };
+  } catch {
+    return defaults;
+  }
+};
 
 const getErrorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -34,14 +98,56 @@ export default function App() {
   const [isNbuLoading, setIsNbuLoading] = useState<boolean>(false);
   const [nbuStatus, setNbuStatus] = useState<{ success?: boolean; message?: string }>({});
   
-  const [totalContractAmount, setTotalContractAmount] = useState<number>(1124.50);
-  const [ecbAmount, setEcbAmount] = useState<number>(1903.00);
-  const [deductEcb, setDeductEcb] = useState<boolean>(false);
+  const [savedParams] = useState(loadParams);
+  const [totalContractAmount, setTotalContractAmount] = useState<number>(savedParams.totalContractAmount);
+  const [ecbAmount, setEcbAmount] = useState<number>(savedParams.ecbAmount);
+  const [deductEcb, setDeductEcb] = useState<boolean>(savedParams.deductEcb);
+  const [deductTaxes, setDeductTaxes] = useState<boolean>(savedParams.deductTaxes);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        PARAMS_KEY,
+        JSON.stringify({ totalContractAmount, ecbAmount, deductEcb, deductTaxes } satisfies SavedParams)
+      );
+    } catch {
+      // хранилище недоступно — параметры останутся до перезагрузки страницы
+    }
+  }, [totalContractAmount, ecbAmount, deductEcb, deductTaxes]);
+
+  // --- Учёт (начисления, переводы, остатки) ---
+  const ledger = useLedger();
+  const [periodOverride, setPeriodOverride] = useState<string>('');
+  const [partOverride, setPartOverride] = useState<string>('');
+  const [paymentNote, setPaymentNote] = useState<string>('');
+  const [isSavingPayment, setIsSavingPayment] = useState<boolean>(false);
+  const [paymentSaved, setPaymentSaved] = useState<string>('');
   
   const [payStubs, setPayStubs] = useState<PayStubData[]>([]);
-  const [teamMembers, setTeamMembers] = useState<TeamMember[]>([]);
+  const [teamMembers, setTeamMembers] = useState<TeamMember[]>(loadManualMembers);
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(
+        MEMBERS_KEY,
+        JSON.stringify(teamMembers.filter((member) => !member.sourceFileName))
+      );
+    } catch {
+      // хранилище недоступно — участники останутся до перезагрузки страницы
+    }
+  }, [teamMembers]);
   const [isDragging, setIsDragging] = useState<boolean>(false);
   const [showConfig, setShowConfig] = useState<boolean>(false);
+  const [activeTab, setActiveTab] = useState<'calc' | 'ledger'>(() =>
+    window.location.hash === '#ledger' ? 'ledger' : 'calc'
+  );
+
+  const switchTab = (tab: 'calc' | 'ledger') => {
+    setActiveTab(tab);
+    // Вкладка остаётся в адресе: при перезагрузке откроется та же.
+    window.history.replaceState(null, '', tab === 'ledger' ? '#ledger' : window.location.pathname);
+    window.scrollTo({ top: 0 });
+  };
   
   const fileInputRef = useRef<HTMLInputElement>(null);
 
@@ -50,32 +156,12 @@ export default function App() {
     setIsNbuLoading(true);
     setNbuStatus({});
     try {
-      // Преобразуем YYYY-MM-DD в YYYYMMDD для NBU Stat API
-      const apiDate = targetDate.replace(/-/g, '');
-      if (apiDate.length !== 8) throw new Error('Некорректный формат даты');
-      
-      const response = await fetch(`https://bank.gov.ua/NBUStatService/v1/statdirectory/exchangenew?valcode=USD&date=${apiDate}&json`);
-      if (!response.ok) {
-        throw new Error(`Ошибка сети: ${response.status}`);
-      }
-      
-      const data = await response.json();
-      if (!Array.isArray(data)) {
-        throw new Error('Некорректный ответ API НБУ');
-      }
-      
-      const usdItem = data[0];
-      if (usdItem && (usdItem.rate !== undefined)) {
-        const rate = usdItem.rate;
-        setExchangeRate(Number(rate));
-        
-        // Преобразуем для красивого вывода дату
-        const parts = targetDate.split('-');
-        const formattedDate = `${parts[2]}.${parts[1]}.${parts[0]}`;
-        setNbuStatus({ success: true, message: `Курс USD на ${formattedDate} успешно загружен: ${rate} грн.` });
-      } else {
-        throw new Error('Курс USD на указанную дату отсутствует в API НБУ');
-      }
+      const rate = await fetchNbuRate(targetDate);
+      setExchangeRate(rate);
+
+      const parts = targetDate.split('-');
+      const formattedDate = `${parts[2]}.${parts[1]}.${parts[0]}`;
+      setNbuStatus({ success: true, message: `Курс USD на ${formattedDate} успешно загружен: ${rate} грн.` });
     } catch (error: unknown) {
       console.error('NBU API Fetch Error:', error);
       setNbuStatus({ success: false, message: `Не удалось загрузить курс: ${getErrorMessage(error)}` });
@@ -214,7 +300,59 @@ export default function App() {
     exchangeRate,
     ecbAmount,
     deductEcb,
+    deductTaxes,
   });
+
+  // --- Сохранение выплаты в учёт ---
+  const period = periodOverride || defaultPeriodForDate(date);
+  const suggestedPart = nextPartForPeriod(ledger.data.accruals, period);
+  const part = Math.max(1, parseInt(partOverride, 10) || suggestedPart);
+  const totalBalanceUSD = useMemo(
+    () => computeBalances(ledger.data, 0).reduce((sum, b) => sum + b.balanceUSD, 0),
+    [ledger.data]
+  );
+  const memberNames = useMemo(() => teamMembers.map((member) => member.name), [teamMembers]);
+
+  const savePayment = async () => {
+    if (calculatedMembers.length === 0) {
+      alert('Сначала загрузите PayStub или добавьте участников — сохранять пока нечего.');
+      return;
+    }
+    if (!period) {
+      alert('Укажите месяц, за который эта выплата.');
+      return;
+    }
+    const names = calculatedMembers.map((member) => member.name.trim());
+    if (names.some((name) => !name) || new Set(names).size !== names.length) {
+      alert('У каждого участника должно быть своё непустое имя — по нему ведётся остаток.');
+      return;
+    }
+    const existing = ledger.data.accruals.filter((a) => a.period === period && a.part === part);
+    if (
+      existing.length > 0 &&
+      !confirm(`Часть ${part} за ${formatPeriod(period)} уже сохранена. Заменить её новым расчётом?`)
+    ) return;
+
+    setIsSavingPayment(true);
+    setPaymentSaved('');
+    const ok = await ledger.apply({
+      deleteIds: existing.map((a) => a.id),
+      accruals: buildAccruals({
+        members: calculatedMembers,
+        date,
+        period,
+        part,
+        rate: exchangeRate,
+        note: paymentNote.trim(),
+      }),
+    });
+    setIsSavingPayment(false);
+    if (ok) {
+      setPaymentSaved(`Часть ${part} за ${formatPeriod(period)} сохранена в учёт`);
+      setPartOverride('');
+      setPaymentNote('');
+    }
+  };
 
   // Column Totals
   const totalPaystubRemaining = calculatedMembers.reduce((sum, m) => sum + m.payStubRemaining, 0);
@@ -222,9 +360,11 @@ export default function App() {
   const totalTax5 = calculatedMembers.reduce((sum, m) => sum + m.tax5, 0);
   const totalTax1 = calculatedMembers.reduce((sum, m) => sum + m.tax1, 0);
   const totalNetUSD = calculatedMembers.reduce((sum, m) => sum + m.netUSD, 0);
-  const totalNetUAH = calculatedMembers.reduce((sum, m) => sum + m.netUAH, 0);
   const totalEcbUAH = calculatedMembers.reduce((sum, m) => sum + m.ecbUAH, 0);
   const totalToCardUAH = calculatedMembers.reduce((sum, m) => sum + m.toCardUAH, 0);
+  const toUSD = (uah: number) => (exchangeRate > 0 ? uah / exchangeRate : 0);
+  const totalEcbUSD = toUSD(totalEcbUAH);
+  const totalTaxesUSD = totalTax5 + totalTax1 + totalEcbUSD;
 
   // Formatting Helper
   const formatCurrency = (val: number, isUah = false) => {
@@ -244,19 +384,42 @@ export default function App() {
             Автоматический расчет долей, налогов и ЕСВ на основе paystub-файлов и курсов НБУ
           </p>
         </div>
-        <div style={{ display: 'flex', gap: '0.75rem' }}>
-          <button 
-            onClick={() => setShowConfig(!showConfig)}
-            className={`btn btn-secondary`}
-          >
-            <Settings size={18} />
-            {showConfig ? 'Скрыть настройки' : 'Настройка участников'}
-          </button>
-        </div>
+        {activeTab === 'calc' && (
+          <div style={{ display: 'flex', gap: '0.75rem' }}>
+            <button
+              onClick={() => setShowConfig(!showConfig)}
+              className={`btn btn-secondary`}
+            >
+              <Settings size={18} />
+              {showConfig ? 'Скрыть настройки' : 'Настройка участников'}
+            </button>
+          </div>
+        )}
       </header>
 
+      {/* Вкладки */}
+      <nav className="tabs" role="tablist">
+        <button
+          role="tab"
+          aria-selected={activeTab === 'calc'}
+          className={`tab ${activeTab === 'calc' ? 'active' : ''}`}
+          onClick={() => switchTab('calc')}
+        >
+          <CreditCard size={16} /> Расчёт
+        </button>
+        <button
+          role="tab"
+          aria-selected={activeTab === 'ledger'}
+          className={`tab ${activeTab === 'ledger' ? 'active' : ''}`}
+          onClick={() => switchTab('ledger')}
+        >
+          <Wallet size={16} /> Учёт и остатки
+          {totalBalanceUSD !== 0 && <span className="tab-badge">${formatCurrency(totalBalanceUSD, true)}</span>}
+        </button>
+      </nav>
+
       {/* Main Grid */}
-      <div className="dashboard-grid">
+      <div className="dashboard-grid" style={{ display: activeTab === 'calc' ? undefined : 'none' }}>
         
         {/* Left Sidebar: Controls & Files */}
         <div className="settings-group">
@@ -358,6 +521,31 @@ export default function App() {
                   onChange={(e) => setEcbAmount(parseFloat(e.target.value) || 0)}
                   className="input-control"
                 />
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.4rem', paddingLeft: '0.25rem' }}>
+                  {exchangeRate > 0
+                    ? `≈ $${(ecbAmount / exchangeRate).toLocaleString('ru-RU', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} по курсу ${exchangeRate}`
+                    : 'Укажите курс, чтобы увидеть сумму в долларах'}
+                </p>
+              </div>
+
+              <div style={{ padding: '0.5rem 0' }}>
+                <label className="switch-container">
+                  <input
+                    type="checkbox"
+                    checked={deductTaxes}
+                    onChange={(e) => setDeductTaxes(e.target.checked)}
+                    className="switch-input"
+                  />
+                  <div className="switch-track">
+                    <div className="switch-thumb"></div>
+                  </div>
+                  <span style={{ fontSize: '0.95rem', fontWeight: 500 }}>Вычитать налоги (5% + 1%)</span>
+                </label>
+                <p style={{ fontSize: '0.75rem', color: 'var(--text-muted)', marginTop: '0.5rem', paddingLeft: '0.25rem' }}>
+                  {deductTaxes
+                    ? 'Налоги будут вычтены из этой выплаты.'
+                    : 'Эта выплата пойдёт на баланс без вычета налогов.'}
+                </p>
               </div>
 
               <div style={{ padding: '0.5rem 0' }}>
@@ -465,19 +653,7 @@ export default function App() {
 
               <div style={{ display: 'flex', flexDirection: 'column', gap: '1rem' }}>
                 {teamMembers.map((member) => (
-                  <div 
-                    key={member.id} 
-                    style={{ 
-                      display: 'grid', 
-                      gridTemplateColumns: '1fr 1fr 1fr auto',
-                      gap: '1rem', 
-                      alignItems: 'end',
-                      background: 'rgba(255, 255, 255, 0.02)',
-                      padding: '1rem',
-                      borderRadius: '10px',
-                      border: '1px solid rgba(255, 255, 255, 0.05)'
-                    }}
-                  >
+                  <div key={member.id} className="member-row">
                     <div className="input-group">
                       <label className="input-label" style={{ fontSize: '0.75rem' }}>Отображаемое имя</label>
                       <input 
@@ -551,11 +727,11 @@ export default function App() {
                       </div>
                     )}
 
-                    {!member.sourceFileName && (
+                    {!member.sourceFileName && member.id !== PERMANENT_MEMBER_ID && (
                       <button
                         onClick={() => deleteMember(member.id)}
                         className="btn btn-danger"
-                        style={{ padding: '0.5rem', borderRadius: '8px' }}
+                        style={{ padding: '0.5rem', borderRadius: '8px', justifySelf: 'start' }}
                         title="Удалить сотрудника"
                       >
                         <Trash2 size={16} />
@@ -585,9 +761,8 @@ export default function App() {
                     <th>Грязная ($)</th>
                     <th>Налог 5%</th>
                     <th>Воен. сб. 1%</th>
+                    <th>Вычет ЕСВ</th>
                     <th>Чистыми ($)</th>
-                    <th>Чистыми (грн)</th>
-                    <th>Вычет ЕСВ (грн)</th>
                     <th>На карту (грн)</th>
                   </tr>
                 </thead>
@@ -642,17 +817,18 @@ export default function App() {
                             {formatCurrency(member.tax1 * exchangeRate, true)} ₴
                           </div>
                         </td>
-                        {/* Чистыми ($) */}
-                        <td style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
-                          ${formatCurrency(member.netUSD)}
-                        </td>
-                        {/* Чистыми (грн) */}
-                        <td style={{ fontWeight: 500, color: 'var(--secondary)' }}>
-                          {formatCurrency(member.netUAH, true)} ₴
-                        </td>
-                        {/* Вычет ЕСВ (грн) */}
+                        {/* Вычет ЕСВ */}
                         <td style={{ color: member.ecbUAH > 0 ? 'var(--accent)' : 'var(--text-muted)' }}>
-                          {member.ecbUAH > 0 ? `-${formatCurrency(member.ecbUAH, true)} ₴` : '0.00 ₴'}
+                          <div>{member.ecbUAH > 0 ? `-$${formatCurrency(toUSD(member.ecbUAH))}` : '$0,00'}</div>
+                          {member.ecbUAH > 0 && (
+                            <div style={{ fontSize: '0.75rem', color: 'var(--text-muted)' }}>
+                              -{formatCurrency(member.ecbUAH, true)} ₴
+                            </div>
+                          )}
+                        </td>
+                        {/* Чистыми ($) — после налогов и ЕСВ */}
+                        <td style={{ fontWeight: 500, color: 'var(--text-primary)' }}>
+                          ${formatCurrency(member.netUSD - toUSD(member.ecbUAH))}
                         </td>
                         {/* На карту (грн) */}
                         <td style={{ fontWeight: 700, color: 'var(--success)', fontSize: '1.05rem' }}>
@@ -682,15 +858,40 @@ export default function App() {
                         {formatCurrency(totalTax1 * exchangeRate, true)} ₴
                       </div>
                     </td>
-                    <td>${formatCurrency(totalNetUSD)}</td>
-                    <td>{formatCurrency(totalNetUAH, true)} ₴</td>
-                    <td>{totalEcbUAH > 0 ? `-${formatCurrency(totalEcbUAH, true)} ₴` : '0.00 ₴'}</td>
+                    <td>
+                      <div>{totalEcbUAH > 0 ? `-$${formatCurrency(totalEcbUSD)}` : '$0,00'}</div>
+                      {totalEcbUAH > 0 && (
+                        <div style={{ fontSize: '0.75rem', color: 'rgba(255, 255, 255, 0.5)' }}>
+                          -{formatCurrency(totalEcbUAH, true)} ₴
+                        </div>
+                      )}
+                    </td>
+                    <td>${formatCurrency(totalNetUSD - totalEcbUSD)}</td>
                     <td style={{ fontSize: '1.15rem', textShadow: '0 0 10px rgba(0, 230, 118, 0.2)' }}>
                       {formatCurrency(totalToCardUAH, true)} ₴
                     </td>
                   </tr>
                 </tbody>
               </table>
+            </div>
+
+            {/* Общая сумма налогов всех участников */}
+            <div className="tax-total">
+              <div>
+                <div style={{ fontWeight: 600 }}>Всего налогов за {memberCount} уч.</div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)', marginTop: '0.25rem' }}>
+                  5%: ${formatCurrency(totalTax5, true)} · 1%: ${formatCurrency(totalTax1, true)} · ЕСВ:{' '}
+                  {deductEcb ? `$${formatCurrency(totalEcbUSD, true)}` : 'не вычитается'}
+                </div>
+              </div>
+              <div style={{ textAlign: 'right' }}>
+                <div style={{ fontSize: '1.4rem', fontWeight: 700, color: 'var(--accent)' }}>
+                  ${formatCurrency(totalTaxesUSD, true)}
+                </div>
+                <div style={{ fontSize: '0.8rem', color: 'var(--text-muted)' }}>
+                  {formatCurrency(totalTaxesUSD * exchangeRate, true)} ₴
+                </div>
+              </div>
             </div>
 
             {/* Calculations logic description helper */}
@@ -701,14 +902,74 @@ export default function App() {
                 • Доля PayStub рассчитывается автоматически: <code>1 / количество участников без фиксированной зарплаты ({splitParticipantCount}) = {formatCurrency(payStubSplitRatio)}</code>.<br />
                 • Грязная зп (Gross) для файлов = <code>REMAINING PAY * доля PayStub</code>.<br />
                 • Участники без файла делят остаток: <code>(Общая сумма - зарплаты по файлам и фиксированные выплаты) / количество участников без файла</code>.<br />
-                • Налог = <code>Gross * 5%</code>. Военный сбор = <code>Gross * 1%</code>.<br />
-                • Чистыми (USD) = <code>Gross - Налоги (6%)</code>. Чистыми (грн) = <code>Чистыми (USD) * Курс НБУ ({exchangeRate})</code>.<br />
+                • Налог = <code>Gross * 5%</code>. Военный сбор = <code>Gross * 1%</code>{deductTaxes ? '' : ' (сейчас отключены галочкой «Вычитать налоги»)'}.<br />
+                • Чистыми (USD) = <code>Gross - Налоги (6%) - ЕСВ в долларах</code>. На карту (грн) = <code>Чистыми (USD) * Курс НБУ ({exchangeRate})</code>.<br />
                 • При включенном ЕСВ вычитается ровно <code>{formatCurrency(ecbAmount, true)} ₴ / {memberCount} чел. = {formatCurrency(ecbPerMember, true)} ₴</code> из выплаты каждого участника.
               </div>
             </div>
           </div>
-          
+
+          {/* Сохранение выплаты в учёт */}
+          <div className="glass-card" style={{ padding: '1.5rem' }}>
+            <h2 style={{ fontSize: '1.2rem', marginBottom: '0.5rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+              <Save size={20} style={{ color: 'var(--success)' }} />
+              Сохранить выплату в учёт
+            </h2>
+            <p style={{ fontSize: '0.85rem', color: 'var(--text-secondary)', marginBottom: '1rem' }}>
+              Каждому участнику на баланс зачислится его сумма «Чистыми ($)»{deductEcb ? ' за вычетом ЕСВ' : ''}.
+              Зарплата за месяц приходит двумя частями — сохраняйте каждую отдельно.
+            </p>
+            <div className="ledger-form">
+              <div className="input-group">
+                <label className="input-label">За какой месяц</label>
+                <input
+                  type="month"
+                  value={period}
+                  onChange={(e) => setPeriodOverride(e.target.value)}
+                  className="input-control"
+                />
+              </div>
+              <div className="input-group">
+                <label className="input-label">Часть выплаты</label>
+                <input
+                  type="number"
+                  min="1"
+                  step="1"
+                  value={partOverride || String(suggestedPart)}
+                  onChange={(e) => setPartOverride(e.target.value)}
+                  className="input-control"
+                />
+              </div>
+              <div className="input-group">
+                <label className="input-label">Комментарий</label>
+                <input
+                  type="text"
+                  value={paymentNote}
+                  onChange={(e) => setPaymentNote(e.target.value)}
+                  className="input-control"
+                  placeholder="необязательно"
+                />
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: '0.75rem', alignItems: 'center', marginTop: '1rem', flexWrap: 'wrap' }}>
+              <button onClick={() => void savePayment()} disabled={isSavingPayment} className="btn btn-primary">
+                <Save size={16} />
+                {isSavingPayment ? 'Сохранение…' : `Сохранить: ${formatPeriod(period)}, часть ${part}`}
+              </button>
+              {paymentSaved && (
+                <span style={{ color: 'var(--success)', fontSize: '0.85rem', display: 'flex', alignItems: 'center', gap: '0.35rem' }}>
+                  <Check size={14} /> {paymentSaved}
+                  <button className="link-button" onClick={() => switchTab('ledger')}>Открыть учёт →</button>
+                </span>
+              )}
+            </div>
+          </div>
+
         </div>
+      </div>
+
+      <div style={{ display: activeTab === 'ledger' ? undefined : 'none' }}>
+        <Ledger ledger={ledger} currentRate={exchangeRate} memberNames={memberNames} today={date} />
       </div>
     </div>
   );

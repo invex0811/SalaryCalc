@@ -19,6 +19,8 @@ export interface SalaryCalculationInput {
   exchangeRate: number;
   ecbAmount: number;
   deductEcb: boolean;
+  /** Вычитать ли налог 5% и военный сбор 1% из этой выплаты. По умолчанию — да. */
+  deductTaxes?: boolean;
 }
 
 export interface CalculatedMember extends TeamMember {
@@ -53,6 +55,7 @@ export const calculateSalaries = ({
   exchangeRate,
   ecbAmount,
   deductEcb,
+  deductTaxes = true,
 }: SalaryCalculationInput): SalaryCalculationResult => {
   const memberCount = teamMembers.length;
   const splitParticipantCount = teamMembers.filter(
@@ -100,8 +103,8 @@ export const calculateSalaries = ({
     const grossUSD = member.salaryType === 'remainder'
       ? remainderGrossPerMember
       : member.grossUSD;
-    const tax5 = grossUSD * 0.05;
-    const tax1 = grossUSD * 0.01;
+    const tax5 = deductTaxes ? grossUSD * 0.05 : 0;
+    const tax1 = deductTaxes ? grossUSD * 0.01 : 0;
     const netUSD = grossUSD - (tax5 + tax1);
     const netUAH = netUSD * exchangeRate;
     const ecbUAH = deductEcb ? ecbPerMember : 0;

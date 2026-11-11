@@ -1,73 +1,40 @@
-# React + TypeScript + Vite
+# SalaryCalc
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+Калькулятор зарплаты: делит выплату по PayStub-файлам между участниками, считает налоги (5% + 1%), ЕСВ, курс НБУ — и ведёт учёт, у кого сколько денег осталось.
 
-Currently, two official plugins are available:
+## Как пользоваться учётом
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+Зарплата за месяц приходит двумя частями в следующем месяце (за октябрь — двумя платежами в ноябре).
 
-## React Compiler
+1. **Пришёл платёж** — загрузите PayStub, проверьте расчёт. Переключатель «Вычитать налоги (5% + 1%)» решает, удерживать ли налоги с этой конкретной выплаты.
+2. **«Сохранить выплату в учёт»** — месяц подставляется автоматически (предыдущий от даты расчёта), номер части тоже (1, затем 2). Каждому участнику на баланс зачисляется его «Чистыми ($)».
+3. **Перевели часть денег** — в блоке «Записать перевод» выберите, чьи это деньги, сумму в $ или в грн (курс НБУ на дату подставится сам). Остаток человека уменьшится.
+4. Блок **«Учёт и остатки»** показывает остаток каждого в $ и в грн по текущему курсу, начисления по месяцам и всю историю. Любую запись можно удалить.
 
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+Без подключения Google Таблицы данные хранятся только в браузере (localStorage).
 
-## Expanding the ESLint configuration
+## Подключение Google Таблицы
 
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
+Данные будут сохраняться в вашу таблицу и автоматически подтягиваться на любом устройстве.
 
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
+1. Создайте новую Google Таблицу.
+2. **Расширения → Apps Script**. Удалите всё в `Code.gs` и вставьте содержимое файла [`google-apps-script/Code.gs`](google-apps-script/Code.gs).
+3. В строке `const SECRET = '...'` впишите свой секретный ключ (любая длинная строка). Сохраните.
+4. **Начать развертывание → Новое развертывание → Веб-приложение**:
+   - Запуск от имени: **От моего имени**
+   - У кого есть доступ: **Все**
+5. Разрешите доступ, скопируйте **URL веб-приложения** (заканчивается на `/exec`).
+6. На сайте: **«Подключить Google Таблицу»** → вставьте URL и ключ → «Подключить».
 
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
+Скрипт сам создаст листы «Начисления», «Переводы» и «Баланс». Если в браузере уже были записи, а таблица пустая — они выгрузятся в таблицу. URL и ключ хранятся только в вашем браузере, в репозиторий не попадают. Без ключа скрипт данные не отдаёт.
 
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+> Если меняете код скрипта — создавайте новую версию развертывания (Управление развертываниями → Изменить → Новая версия), иначе будет работать старая.
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+## Разработка
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
-
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
+```bash
+npm install
+npm run dev      # локальный сервер
+npm test         # тесты расчётов и учёта
+npm run build    # сборка для GitHub Pages
 ```
